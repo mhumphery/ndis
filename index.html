@@ -4,12 +4,14 @@
   <meta charset="utf-8"/>
   <title>NDIS providers by postcode</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
   <link
     rel="stylesheet"
     href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
     crossorigin=""
   />
+
   <style>
     html, body { height: 100%; margin: 0; }
     #map { height: 100%; width: 100%; }
@@ -25,13 +27,13 @@
       border-radius: 6px;
       box-shadow: 0 2px 6px rgba(0,0,0,0.25);
       font-size: 13px;
-      min-width: 240px;
+      min-width: 280px;
     }
 
     /* Permanent panel */
     #info-panel {
       position: absolute;
-      top: 85px;
+      top: 95px;
       right: 10px;
       z-index: 9999;
       background: white;
@@ -39,7 +41,57 @@
       border-radius: 6px;
       box-shadow: 0 2px 6px rgba(0,0,0,0.30);
       font-size: 13px;
-      min-width: 240px;
+      min-width: 280px;
+    }
+
+    /* Table panel (right side) */
+    #table-panel {
+      position: absolute;
+      top: 190px;
+      right: 10px;
+      z-index: 9999;
+      background: white;
+      padding: 10px;
+      border-radius: 6px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.30);
+      font-size: 12px;
+      width: 320px;
+      max-height: 60%;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    #table-wrap {
+      overflow-y: auto;
+      border: 1px solid #eee;
+      border-radius: 6px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    thead th {
+      position: sticky;
+      top: 0;
+      background: #fafafa;
+      border-bottom: 1px solid #e6e6e6;
+      padding: 8px 6px;
+      cursor: pointer;
+      user-select: none;
+      font-weight: 600;
+    }
+
+    tbody td {
+      border-bottom: 1px solid #f0f0f0;
+      padding: 7px 6px;
+    }
+
+    tbody tr:hover {
+      background: #f7f7ff;
     }
 
     .btn {
@@ -55,6 +107,8 @@
       border: 1px solid #ccc;
       border-radius: 4px;
     }
+
+    .smallmuted { color: #666; font-size: 11px; }
   </style>
 </head>
 <body>
@@ -66,13 +120,37 @@
     <input id="pc-input" class="input" type="text" placeholder="e.g. 2000" />
     <button id="pc-go" class="btn">Go</button>
   </div>
-  <div id="pc-msg" style="margin-top:6px; color:#666;"></div>
+  <div id="pc-msg" class="smallmuted" style="margin-top:6px;"></div>
 </div>
 
 <div id="info-panel">
   <b>Selection</b>
   <div id="info-panel-content" style="margin-top:6px;">
     Search for a postcode…
+  </div>
+</div>
+
+<div id="table-panel">
+  <div style="font-weight:600;">Providers by postcode</div>
+
+  <input id="table-filter" class="input" type="text" placeholder="Filter (e.g. 20 or 2000)" />
+
+  <div class="smallmuted" id="table-status"></div>
+
+  <div id="table-wrap">
+    <table id="postcode-table">
+      <thead>
+        <tr>
+          <th data-key="postcode" style="text-align:left;">Postcode</th>
+          <th data-key="providers" style="text-align:right;">Providers</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="smallmuted">
+    Tip: click a row to zoom + update “Selection”.
   </div>
 </div>
 
@@ -87,6 +165,7 @@
   const USE_LOG_SCALE = true;
   const LEGEND_TITLE = "NDIS Providers per Postcode (log scale)";
   const POA_COL = "POA_CODE21";
+  const HIGHLIGHT_PC = "2000";
 
   const map = L.map('map', { zoomControl: true }).setView([-25, 133], 4);
 
@@ -100,13 +179,16 @@
     if (v === null || v === undefined || v === "") return "—";
     return v;
   }
+
   function normalizePostcode(s) {
     const digits = String(s || "").replace(/\D/g, "");
     return digits.length === 4 ? digits : digits;
   }
+
   function setMsg(txt) {
     document.getElementById("pc-msg").textContent = txt || "";
   }
+
   function updatePanel(pc, cnt) {
     document.getElementById("info-panel-content").innerHTML =
       "<b>Postcode:</b> " + safe(pc) + "<br/>" +
@@ -117,16 +199,16 @@
   const resp = await fetch('poa_counts.geojson', { cache: 'no-store' });
   const data = await resp.json();
 
-  // Color scale
-  const vals = data.features.map(f => f.properties.value_for_color || 0);
-  const vmin = Math.min(...vals), vmax = Math.max(...vals);
+  // Collect values for colour scale
+  const vals = data.features.map(f => (f.properties.value_for_color ?? 0));
+  const vmin = Math.min(...vals);
+  const vmax = Math.max(...vals);
 
   function lerp(a,b,t) { return a + (b-a)*t; }
   function clamp01(x) { return Math.max(0, Math.min(1, x)); }
 
-  // Simple YlOrRd-like ramp (no dependency)
+  // Simple YlOrRd-ish ramp
   function colorRamp(t) {
-    // 3-stop ramp: pale yellow -> orange -> red
     t = clamp01(t);
     const c1 = [255, 255, 204];
     const c2 = [254, 153, 41];
@@ -147,21 +229,21 @@
     return colorRamp(t);
   }
 
-  let geoLayer = null;
   const layersByPostcode = new Map();
 
-  function style(f) {
+  function style(feature) {
+    const v = feature.properties.value_for_color ?? 0;
     return {
       color: "#333",
       weight: 0.2,
       fillOpacity: 0.75,
-      fillColor: getFillColor(f.properties.value_for_color || 0),
+      fillColor: getFillColor(v),
     };
   }
 
-  geoLayer = L.geoJSON(data, {
+  const geoLayer = L.geoJSON(data, {
     style,
-    onEachFeature: function (feature, layer) {
+    onEachFeature: function(feature, layer) {
       const pc = String(feature.properties[POA_COL] || "");
       layersByPostcode.set(pc, layer);
 
@@ -172,20 +254,15 @@
     }
   }).addTo(map);
 
-  // Highlight 2000
-  const pc2000 = "2000";
-  if (layersByPostcode.has(pc2000)) {
-    const layer2000 = layersByPostcode.get(pc2000);
+  // Highlight 2000 (or chosen postcode)
+  if (layersByPostcode.has(HIGHLIGHT_PC)) {
+    const layer2000 = layersByPostcode.get(HIGHLIGHT_PC);
     L.geoJSON(layer2000.feature, {
-      style: {
-        color: "blue",
-        weight: 3,
-        fillOpacity: 0
-      }
+      style: { color: "blue", weight: 3, fillOpacity: 0 }
     }).addTo(map);
   }
 
-  // Search action
+  // --- Search action (Go to postcode) ---
   function go() {
     const pc = normalizePostcode(document.getElementById("pc-input").value);
     if (pc.length !== 4) {
@@ -200,11 +277,115 @@
     setMsg("");
     map.fitBounds(layer.getBounds());
     updatePanel(pc, layer.feature.properties.provider_count);
+
+    // Also highlight the row in the table if visible
+    highlightRow(pc);
   }
 
   document.getElementById("pc-go").addEventListener("click", go);
   document.getElementById("pc-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") go();
+  });
+
+  // =========================
+  // RIGHT-SIDE SORTABLE TABLE
+  // =========================
+  const tableData = data.features.map(f => ({
+    postcode: String(f.properties[POA_COL] || ""),
+    providers: Number(f.properties.provider_count || 0)
+  })).filter(r => r.postcode.length > 0);
+
+  // default sort: providers descending
+  tableData.sort((a,b) => b.providers - a.providers);
+
+  const tbody = document.querySelector("#postcode-table tbody");
+  const filterInput = document.getElementById("table-filter");
+  const statusEl = document.getElementById("table-status");
+
+  let currentSort = { key: "providers", asc: false };
+  let lastSelectedPostcode = null;
+
+  function highlightRow(pc) {
+    lastSelectedPostcode = pc;
+    const rows = tbody.querySelectorAll("tr");
+    rows.forEach(r => {
+      if (r.dataset.postcode === pc) {
+        r.style.background = "#eef3ff";
+      } else {
+        r.style.background = "";
+      }
+    });
+  }
+
+  function renderTable(rows) {
+    tbody.innerHTML = "";
+    const frag = document.createDocumentFragment();
+
+    rows.forEach(r => {
+      const tr = document.createElement("tr");
+      tr.dataset.postcode = r.postcode;
+      tr.style.cursor = "pointer";
+
+      tr.innerHTML = `
+        <td>${r.postcode}</td>
+        <td style="text-align:right;">${r.providers.toLocaleString()}</td>
+      `;
+
+      tr.addEventListener("click", () => {
+        const layer = layersByPostcode.get(r.postcode);
+        if (!layer) return;
+        map.fitBounds(layer.getBounds());
+        updatePanel(r.postcode, r.providers);
+        highlightRow(r.postcode);
+      });
+
+      frag.appendChild(tr);
+    });
+
+    tbody.appendChild(frag);
+
+    statusEl.textContent = rows.length.toLocaleString() + " rows";
+    if (lastSelectedPostcode) highlightRow(lastSelectedPostcode);
+  }
+
+  function getFilteredRows() {
+    const q = String(filterInput.value || "").trim();
+    if (!q) return tableData;
+
+    // filter by substring match on postcode (fast + simple)
+    return tableData.filter(r => r.postcode.includes(q));
+  }
+
+  function sortRows(rows) {
+    const key = currentSort.key;
+    const asc = currentSort.asc;
+
+    const sorted = [...rows].sort((a, b) => {
+      if (key === "providers") {
+        return asc ? (a.providers - b.providers) : (b.providers - a.providers);
+      } else {
+        return asc ? a.postcode.localeCompare(b.postcode) : b.postcode.localeCompare(a.postcode);
+      }
+    });
+    return sorted;
+  }
+
+  // initial render
+  renderTable(sortRows(getFilteredRows()));
+
+  // header sorting
+  document.querySelectorAll("#postcode-table th").forEach(th => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.key;
+      const asc = (currentSort.key === key) ? !currentSort.asc : true;
+      currentSort = { key, asc };
+      renderTable(sortRows(getFilteredRows()));
+    });
+  });
+
+  // filtering
+  filterInput.addEventListener("input", () => {
+    renderTable(sortRows(getFilteredRows()));
   });
 
 })();
