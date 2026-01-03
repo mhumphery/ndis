@@ -1,0 +1,213 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>NDIS providers by postcode</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #map { height: 100%; width: 100%; }
+
+    /* Search box */
+    #postcode-search-box {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 9999;
+      background: white;
+      padding: 10px 12px;
+      border-radius: 6px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+      font-size: 13px;
+      min-width: 240px;
+    }
+
+    /* Permanent panel */
+    #info-panel {
+      position: absolute;
+      top: 85px;
+      right: 10px;
+      z-index: 9999;
+      background: white;
+      padding: 10px 14px;
+      border-radius: 6px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.30);
+      font-size: 13px;
+      min-width: 240px;
+    }
+
+    .btn {
+      padding: 6px 10px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      background: #f7f7f7;
+      cursor: pointer;
+    }
+    .input {
+      flex: 1;
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="postcode-search-box">
+  <div style="font-weight:600; margin-bottom:6px;">Go to postcode</div>
+  <div style="display:flex; gap:6px;">
+    <input id="pc-input" class="input" type="text" placeholder="e.g. 2000" />
+    <button id="pc-go" class="btn">Go</button>
+  </div>
+  <div id="pc-msg" style="margin-top:6px; color:#666;"></div>
+</div>
+
+<div id="info-panel">
+  <b>Selection</b>
+  <div id="info-panel-content" style="margin-top:6px;">
+    Search for a postcode…
+  </div>
+</div>
+
+<script
+  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+  crossorigin=""
+></script>
+
+<script>
+(async function() {
+  const USE_LOG_SCALE = true;
+  const LEGEND_TITLE = "NDIS Providers per Postcode (log scale)";
+  const POA_COL = "POA_CODE21";
+
+  const map = L.map('map', { zoomControl: true }).setView([-25, 133], 4);
+
+  // Basemap
+  L.tileLayer(
+    'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+    { attribution: '&copy; OpenStreetMap &copy; CARTO' }
+  ).addTo(map);
+
+  function safe(v) {
+    if (v === null || v === undefined || v === "") return "—";
+    return v;
+  }
+  function normalizePostcode(s) {
+    const digits = String(s || "").replace(/\D/g, "");
+    return digits.length === 4 ? digits : digits;
+  }
+  function setMsg(txt) {
+    document.getElementById("pc-msg").textContent = txt || "";
+  }
+  function updatePanel(pc, cnt) {
+    document.getElementById("info-panel-content").innerHTML =
+      "<b>Postcode:</b> " + safe(pc) + "<br/>" +
+      "<b>Providers:</b> " + safe(cnt);
+  }
+
+  // Load GeoJSON
+  const resp = await fetch('poa_counts.geojson', { cache: 'no-store' });
+  const data = await resp.json();
+
+  // Color scale
+  const vals = data.features.map(f => f.properties.value_for_color || 0);
+  const vmin = Math.min(...vals), vmax = Math.max(...vals);
+
+  function lerp(a,b,t) { return a + (b-a)*t; }
+  function clamp01(x) { return Math.max(0, Math.min(1, x)); }
+
+  // Simple YlOrRd-like ramp (no dependency)
+  function colorRamp(t) {
+    // 3-stop ramp: pale yellow -> orange -> red
+    t = clamp01(t);
+    const c1 = [255, 255, 204];
+    const c2 = [254, 153, 41];
+    const c3 = [227, 26, 28];
+    let c;
+    if (t < 0.5) {
+      const tt = t/0.5;
+      c = [lerp(c1[0],c2[0],tt), lerp(c1[1],c2[1],tt), lerp(c1[2],c2[2],tt)];
+    } else {
+      const tt = (t-0.5)/0.5;
+      c = [lerp(c2[0],c3[0],tt), lerp(c2[1],c3[1],tt), lerp(c2[2],c3[2],tt)];
+    }
+    return `rgb(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])})`;
+  }
+
+  function getFillColor(v) {
+    const t = (vmax === vmin) ? 0 : (v - vmin) / (vmax - vmin);
+    return colorRamp(t);
+  }
+
+  let geoLayer = null;
+  const layersByPostcode = new Map();
+
+  function style(f) {
+    return {
+      color: "#333",
+      weight: 0.2,
+      fillOpacity: 0.75,
+      fillColor: getFillColor(f.properties.value_for_color || 0),
+    };
+  }
+
+  geoLayer = L.geoJSON(data, {
+    style,
+    onEachFeature: function (feature, layer) {
+      const pc = String(feature.properties[POA_COL] || "");
+      layersByPostcode.set(pc, layer);
+
+      layer.bindTooltip(
+        "Postcode: " + safe(pc) + "<br/>Providers: " + safe(feature.properties.provider_count),
+        { sticky: true }
+      );
+    }
+  }).addTo(map);
+
+  // Highlight 2000
+  const pc2000 = "2000";
+  if (layersByPostcode.has(pc2000)) {
+    const layer2000 = layersByPostcode.get(pc2000);
+    L.geoJSON(layer2000.feature, {
+      style: {
+        color: "blue",
+        weight: 3,
+        fillOpacity: 0
+      }
+    }).addTo(map);
+  }
+
+  // Search action
+  function go() {
+    const pc = normalizePostcode(document.getElementById("pc-input").value);
+    if (pc.length !== 4) {
+      setMsg("Please enter a 4-digit postcode.");
+      return;
+    }
+    const layer = layersByPostcode.get(pc);
+    if (!layer) {
+      setMsg("No polygon found for postcode " + pc + ".");
+      return;
+    }
+    setMsg("");
+    map.fitBounds(layer.getBounds());
+    updatePanel(pc, layer.feature.properties.provider_count);
+  }
+
+  document.getElementById("pc-go").addEventListener("click", go);
+  document.getElementById("pc-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") go();
+  });
+
+})();
+</script>
+</body>
+</html>
